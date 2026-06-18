@@ -31,33 +31,241 @@ def load_excel_db():
 permit_df, conduit_df, cable_df, motor_df, breaker_df, imp_df, mccb_list, std_sizes = load_excel_db()
 
 # ==========================================
-# 2. 모바일 UI (상단 탭 설정)
+# 2. 공통 엔진 함수
+# ==========================================
+def get_col_idx_and_method(phase, J_str, size_or_is_single):
+    mapping = {
+        1: {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "D1": 5, "E": 7, "F": 8},
+        3: {"A1": 9, "A2": 10, "B1": 11, "B2": 12, "D1": 13, "E": 15, "F": 16}
+    }
+    if isinstance(size_or_is_single, bool):
+        is_single = size_or_is_single
+    else:
+        is_single = True if size_or_is_single >= 50 else False
+        
+    method = "E"
+    if "D1" in J_str: method = "D1"
+    elif "B" in J_str: method = "B1" if is_single else "B2"
+    elif "EF" in J_str: method = "F" if is_single else "E"
+    return mapping[phase].get(method, mapping[phase]["E"]), method
+
+def get_parallel_group_factor(method, runs):
+    if runs <= 1: return 1.0
+    if "EF" in method:
+        mapping = {2: 0.87, 3: 0.82, 4: 0.80, 5: 0.79, 6: 0.79}
+        return mapping.get(runs, 0.78)
+    else:
+        mapping = {2: 0.80, 3: 0.70, 4: 0.65, 5: 0.60, 6: 0.60}
+        return mapping.get(runs, 0.60)
+
+def get_rx(target_size, core_num):
+    try:
+        sizes = pd.to_numeric(imp_df.iloc[:, 1], errors='coerce')
+        size_match = (sizes - target_size).abs() < 0.1
+        matched_rows = imp_df[size_match]
+        
+        if not matched_rows.empty:
+            target_core_str = f"{core_num}C"
+            if core_num >= 3: target_core_str = "3C" 
+            
+            for _, row in matched_rows.iterrows():
+                cable_str = str(row.iloc[0]).upper().replace(" ", "")
+                if target_core_str in cable_str or (core_num >= 3 and "4C" in cable_str):
+                    r_val = float(row.iloc[2])
+                    x_val = float(row.iloc[3])
+                    if not pd.isna(r_val) and not pd.isna(x_val):
+                        return r_val, x_val
+                        
+            first_match_row = matched_rows.iloc[0]
+            return float(first_match_row.iloc[2]), float(first_match_row.iloc[3])
+    except: pass
+    return 23.4 / target_size, 0.09
+
+# ==========================================
+# 3. 모바일 UI (상단 탭 설정)
 # ==========================================
 st.markdown("**⚡ KEC Cable Conduit Calculator**")
 st.write("---")
 
-# 🚀 [추가됨] 화면 상단에 두 개의 탭 생성
-tab_calc, tab_db = st.tabs(["🧮 계산기", "📁 KEC_Table 조회"])
+tab_calc, tab_lookup = st.tabs(["🧮 메인 부하 계산기", "🔍 케이블 간편 조회"])
 
 # ==========================================
-# [탭 2] KEC_Table 마스터 데이터 뷰어
+# [탭 2] 🔍 케이블 간편 스펙 조회 로직
 # ==========================================
-with tab_db:
-    st.markdown("**📁 마스터 데이터베이스 (KEC_Table.xlsx)**")
-    sheet_choice = st.selectbox("조회할 시트를 선택하세요",
-        ["permit_current (허용전류)", "conduit_spec (전선관)", "cable_spec (케이블)",
-         "moter (전동기)", "동작배율 (차단기)", "cable_imp (임피던스)"]
-    )
+with tab_lookup:
+    st.markdown("**🔍 케이블 단일 스펙 및 전선관 산출**")
+    
+    with st.container(border=True):
+        col_L1, col_L2 = st.columns(2)
+        with col_L1:
+            lk_sys = st.selectbox("전기 방식", ["3상 4선식 (3P 4W)", "3상 3선식 (3P 3W)", "단상 2선식 (1P 2W)"])
+            lk_size = st.selectbox("케이블 굵기 (SQ)", std_sizes, index=8)
+            
+            # 🚀 [UI 위치 수정] 케이블 굵기 바로 하단으로 보호도체(PE) 배치 이동
+            if lk_size <= 16: auto_pe = lk_size
+            elif lk_size <= 35: auto_pe = 16.0
+            else: auto_pe = next((s for s in std_sizes if s >= lk_size / 2), std_sizes[-1])
+            pe_options = ["없음"] + [f"{int(s) if s == int(s) else s}SQ" for s in std_sizes]
+            auto_pe_str = f"{int(auto_pe) if auto_pe == int(auto_pe) else auto_pe}SQ"
+            def_idx = pe_options.index(auto_pe_str)
+            lk_pe_opt = st.selectbox("보호도체 (PE)", pe_options, index=def_idx)
+            
+        with col_L2:
+            lk_core_type = st.selectbox("케이블 형태 (F-CV)", ["단심 (1C)", "다심 (Multi-Core)"])
+            lk_runs = st.number_input("동상 다조 (1상당 포설 조수)", min_value=1, max_value=10, value=1)
 
-    if "permit_current" in sheet_choice: st.dataframe(permit_df, use_container_width=True)
-    elif "conduit_spec" in sheet_choice: st.dataframe(conduit_df, use_container_width=True)
-    elif "cable_spec" in sheet_choice: st.dataframe(cable_df, use_container_width=True)
-    elif "moter" in sheet_choice: st.dataframe(motor_df, use_container_width=True)
-    elif "동작배율" in sheet_choice: st.dataframe(breaker_df, use_container_width=True)
-    elif "cable_imp" in sheet_choice: st.dataframe(imp_df, use_container_width=True)
+    with st.container(border=True):
+        lk_method = st.selectbox("간편 공사방법", ["B (매입/노출 전선관)", "D1 (지중관로)", "EF (케이블 트레이)"], key="lk_method")
+        
+        col_T1, col_T2 = st.columns(2)
+        with col_T1:
+            if "D1" in lk_method:
+                lk_temp_opt = st.selectbox("지중 온도", ["20℃ (1.0)", "30℃ (0.93)", "직접입력"], key="lk_temp_g")
+                lk_temp_f = 0.93 if "30℃" in lk_temp_opt else (st.number_input("지중계수 입력", value=1.00, key="lk_tg_in") if lk_temp_opt == "직접입력" else 1.0)
+                temp_label = "지중"
+            else:
+                lk_temp_opt = st.selectbox("주위 온도 (기중)", ["30℃ (1.0)", "40℃ (0.91)", "직접입력"], key="lk_temp_a")
+                lk_temp_f = 0.91 if "40℃" in lk_temp_opt else (st.number_input("기중계수 입력", value=1.00, key="lk_ta_in") if lk_temp_opt == "직접입력" else 1.0)
+                temp_label = "기중"
+                
+        with col_T2:
+            lk_group_f = 1.0
+            if "EF" in lk_method:
+                lk_tray = st.selectbox("트레이 회로수", ["9회로 이상 (0.78)", "6회로 (0.79)", "4회로 (0.80)", "3회로 (0.82)", "2회로 (0.87)", "1회로 (1.00)"], key="lk_tr")
+                lk_group_f = float(lk_tray.split("(")[1].replace(")", ""))
+            elif lk_runs > 1:
+                lk_group_f = get_parallel_group_factor(lk_method, lk_runs)
+
+    if st.button("스펙 조회하기 🔍", use_container_width=True):
+        st.write("---")
+        
+        if "1P" in lk_sys: lk_phase_val, lk_req_wires = 1, 2
+        elif "3P 3W" in lk_sys: lk_phase_val, lk_req_wires = 3, 3
+        else: lk_phase_val, lk_req_wires = 3, 4
+        
+        lk_is_single = "1C" in lk_core_type
+        lk_search_core = "1C" if lk_is_single else f"{lk_req_wires}C"
+        
+        lk_col_idx, lk_applied_method = get_col_idx_and_method(lk_phase_val, lk_method, lk_is_single)
+        
+        try:
+            row_match = permit_df[pd.to_numeric(permit_df.iloc[:, 0], errors='coerce') == lk_size]
+            lk_base_amp = float(row_match.iloc[0, lk_col_idx]) if not row_match.empty else 0
+        except: lk_base_amp = 0
+        
+        lk_final_amp = lk_base_amp * lk_temp_f * lk_group_f * lk_runs
+        
+        db_cables = cable_df.iloc[:, 0].astype(str).str.replace(" ", "").str.upper()
+        search_str = f"F-CV{int(lk_size) if lk_size == int(lk_size) else lk_size}SQ/{lk_search_core}"
+        
+        match_idx = db_cables[db_cables == search_str].index
+        core_num = 1 if lk_is_single else lk_req_wires
+
+        if not match_idx.empty:
+            lk_area = float(cable_df.iloc[match_idx[0], 2])
+        else:
+            lk_area = lk_size * (3.0 if lk_is_single else lk_req_wires * 3.0)
+            
+        lk_od = math.sqrt((lk_area * 4) / math.pi)
+
+        if lk_pe_opt == "없음":
+            area_pe_single = 0.0
+            pe_od = 0.0
+        else:
+            pe_val = float(lk_pe_opt.replace("SQ", ""))
+            search_str_pe = f"F-GV{int(pe_val) if pe_val == int(pe_val) else pe_val}SQ"
+            match_idx_pe = db_cables[db_cables == search_str_pe].index
+            if match_idx_pe.empty:
+                search_str_pe = f"F-CV{int(pe_val) if pe_val == int(pe_val) else pe_val}SQ/1C"
+                match_idx_pe = db_cables[db_cables == search_str_pe].index
+            area_pe_single = float(cable_df.iloc[match_idx_pe[0], 2]) if not match_idx_pe.empty else pe_val * 3.0
+            pe_od = math.sqrt((area_pe_single * 4) / math.pi)
+        
+        lines_per_run = lk_req_wires if lk_is_single else 1
+        tot_area_run = (lk_area * lines_per_run) + area_pe_single
+        lk_req_pipe_area = tot_area_run * 3.0
+        
+        # 🚀 [문구 표기 수정] 결과가 매칭되지 않을 때 종류별로 '산출 불가'가 명확하게 찍히도록 개선
+        def lookup_pipe_text(regex, prefix):
+            db_names = conduit_df.iloc[:, 0].astype(str).str.replace(" ", "").str.upper()
+            pipes = conduit_df[db_names.str.contains(regex, regex=True)].reset_index(drop=True)
+            for r in range(len(pipes)):
+                try:
+                    pipe_area = float(pipes.iloc[r, 2])
+                    if pipe_area >= lk_req_pipe_area:
+                        ratio = (tot_area_run / pipe_area) * 100
+                        p_name = str(pipes.iloc[r, 1]).replace("Ø", "C") if prefix in ["ELP", "PE"] else str(pipes.iloc[r, 1])
+                        res = f"{prefix} {p_name} (점유율 {ratio:.1f}%)"
+                        if lk_runs > 1: res += f" × {lk_runs}조"
+                        if r > 0:
+                            prev_area = float(pipes.iloc[r-1, 2])
+                            prev_ratio = (tot_area_run / prev_area) * 100
+                            prev_name = str(pipes.iloc[r-1, 1]).replace("Ø", "C") if prefix in ["ELP", "PE"] else str(pipes.iloc[r-1, 1])
+                            res += f"\n   ➔ [축소 시] {prefix} {prev_name} (점유율 {prev_ratio:.1f}%)"
+                        return res
+                except: pass
+            return f"{prefix} 산출 불가 (규격 초과)"
+
+        ref_amps = []
+        for s in std_sizes:
+            try:
+                rm = permit_df[pd.to_numeric(permit_df.iloc[:, 0], errors='coerce') == s]
+                ba = float(rm.iloc[0, lk_col_idx]) if not rm.empty else 0
+                if ba > 0:
+                    sq_fmt = int(s) if s == int(s) else s
+                    ref_amps.append(f"{sq_fmt}SQ({ba:g}A)")
+            except: pass
+            
+        chunk_size = 7
+        rows = []
+        for i in range(chunk_size):
+            row_items = []
+            for j in range(i, len(ref_amps), chunk_size):
+                row_items.append(ref_amps[j].ljust(14))
+            if "".join(row_items).strip():
+                rows.append(" ➔ " + " │ ".join(row_items))
+        ref_amp_str = "\n".join(rows)
+
+        phase_str_out = "3상" if lk_phase_val == 3 else "1상"
+
+        lk_msg = "[케이블 간편 스펙 및 전선관 산출]\n\n"
+        lk_msg += f"📋 [입력 조건]\n"
+        lk_msg += f"- 전기방식: {lk_sys}\n"
+        lk_msg += f"- 공사방법: {lk_method} / {temp_label}온도계수: {lk_temp_f} / 복수계수: {lk_group_f}\n"
+        if lk_pe_opt == "없음":
+            lk_msg += f"- 케이블: F-CV {lk_size}SQ / {lk_search_core} × {lines_per_run}가닥 ({lk_runs}조) / 보호도체: 없음\n\n"
+        else:
+            lk_msg += f"- 케이블: F-CV {lk_size}SQ / {lk_search_core} × {lines_per_run}가닥 ({lk_runs}조) / 보호도체: F-GV {lk_pe_opt}\n\n"
+
+        lk_msg += f"📊 [산출 결과]\n"
+        lk_msg += f"1. 적용 허용전류: {lk_final_amp:.1f} A\n"
+        lk_msg += f"   (기본 {lk_base_amp:.1f}A @{phase_str_out} {lk_applied_method} × 온도 {lk_temp_f} × 복수 {lk_group_f} × {lk_runs}조)\n\n"
+        
+        lk_msg += f"💡 [참고] 시공방법(@{phase_str_out} {lk_applied_method}) 굵기별 기본 허용전류\n"
+        lk_msg += f"{ref_amp_str}\n\n"
+
+        lk_msg += f"2. 케이블 정보\n"
+        lk_msg += f" - 케이블: 1가닥 외경 약 {lk_od:.1f} mm (단면적 {lk_area:.1f}㎟)\n"
+        if lk_pe_opt != "없음":
+            lk_msg += f" - 보호도체: 1가닥 외경 약 {pe_od:.1f} mm (단면적 {area_pe_single:.1f}㎟)\n\n"
+        else:
+            lk_msg += "\n"
+
+        lk_msg += f"3. 적정 전선관 규격 (점유율 33.3% 이하)\n"
+        if "EF" in lk_method:
+            lk_msg += " - 해당 없음 (케이블 트레이 공사)\n"
+        elif "D1" in lk_method:
+            lk_msg += f" - {lookup_pipe_text('ELP|파형', 'ELP')}\n"
+            lk_msg += f" - {lookup_pipe_text('PE', 'PE')}\n"
+        else:
+            lk_msg += f" - {lookup_pipe_text('CD|파상', 'CD')}\n"
+            lk_msg += f" - {lookup_pipe_text('HI|경질', 'HI')}\n"
+            lk_msg += f" - {lookup_pipe_text('ST|스틸|강제', 'ST')}\n"
+
+        st.code(lk_msg, language="text")
 
 # ==========================================
-# [탭 1] 기존 계산기 로직 (수정 절대 없음)
+# [탭 1] 🧮 기존 메인 부하 계산기 (원형 유지)
 # ==========================================
 with tab_calc:
     with st.container():
@@ -192,50 +400,6 @@ with tab_calc:
                     inst_multiple = current_inst_multiple
                     break
 
-        def get_col_idx_and_method(phase, J_str, size):
-            mapping = {
-                1: {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "D1": 5, "E": 7, "F": 8},
-                3: {"A1": 9, "A2": 10, "B1": 11, "B2": 12, "D1": 13, "E": 15, "F": 16}
-            }
-            is_single = True if size >= 50 else False
-            method = "E"
-            if "D1" in J_str: method = "D1"
-            elif "B" in J_str: method = "B1" if is_single else "B2"
-            elif "EF" in J_str: method = "F" if is_single else "E"
-            return mapping[phase].get(method, mapping[phase]["E"]), method
-
-        def get_parallel_group_factor(method, runs):
-            if runs <= 1: return 1.0
-            if "EF" in method:
-                mapping = {2: 0.87, 3: 0.82, 4: 0.80, 5: 0.79, 6: 0.79}
-                return mapping.get(runs, 0.78)
-            else:
-                mapping = {2: 0.80, 3: 0.70, 4: 0.65, 5: 0.60, 6: 0.60}
-                return mapping.get(runs, 0.60)
-
-        def get_rx(target_size, core_num):
-            try:
-                sizes = pd.to_numeric(imp_df.iloc[:, 1], errors='coerce')
-                size_match = (sizes - target_size).abs() < 0.1
-                matched_rows = imp_df[size_match]
-                
-                if not matched_rows.empty:
-                    target_core_str = f"{core_num}C"
-                    if core_num >= 3: target_core_str = "3C" 
-                    
-                    for _, row in matched_rows.iterrows():
-                        cable_str = str(row.iloc[0]).upper().replace(" ", "")
-                        if target_core_str in cable_str or (core_num >= 3 and "4C" in cable_str):
-                            r_val = float(row.iloc[2])
-                            x_val = float(row.iloc[3])
-                            if not pd.isna(r_val) and not pd.isna(x_val):
-                                return r_val, x_val
-                                
-                    first_match_row = matched_rows.iloc[0]
-                    return float(first_match_row.iloc[2]), float(first_match_row.iloc[3])
-            except: pass
-            return 23.4 / target_size, 0.09
-
         k_coef = 30.8 if phase == 3 else 35.6
         e_max = v_sys * (v_drop_limit / 100.0)
         req_area_vd = (k_coef * distance * i_load) / (1000 * e_max)
@@ -275,7 +439,7 @@ with tab_calc:
 
         # 1단계: 1조 포설(1~300SQ)
         for s in std_sizes:
-            col_idx, temp_method = get_col_idx_and_method(phase, install_method, s)
+            col_idx, temp_method = get_col_idx_and_method(phase, install_method, s >= 50)
             try:
                 row_match = permit_df[pd.to_numeric(permit_df.iloc[:, 0], errors='coerce') == s]
                 base_amp = float(row_match.iloc[0, col_idx]) if not row_match.empty else 0
@@ -329,7 +493,7 @@ with tab_calc:
                 max_sq_this_run = 0
                 
                 for s in parallel_sizes:
-                    col_idx, temp_method = get_col_idx_and_method(phase, install_method, s)
+                    col_idx, temp_method = get_col_idx_and_method(phase, install_method, s >= 50)
                     try:
                         row_match = permit_df[pd.to_numeric(permit_df.iloc[:, 0], errors='coerce') == s]
                         base_amp = float(row_match.iloc[0, col_idx]) if not row_match.empty else 0
@@ -433,7 +597,7 @@ with tab_calc:
         
         copy_conduit_txt = ""
 
-        def get_pipe_info(regex_keyword):
+        def get_pipe_info(regex_keyword, prefix):
             db_names = conduit_df.iloc[:, 0].astype(str).str.replace(" ", "").str.upper()
             pipes = conduit_df[db_names.str.contains(regex_keyword, regex=True)].reset_index(drop=True)
             for r in range(len(pipes)):
@@ -441,26 +605,28 @@ with tab_calc:
                     pipe_area = float(pipes.iloc[r, 2])
                     if pipe_area >= req_pipe_area_per_run: 
                         ratio = (total_area_per_run / pipe_area) * 100
-                        base_str = f"{pipes.iloc[r, 1]}"
-                        res_str = f"{base_str} (단면적 {pipe_area:.1f}㎟ / 점유율 {ratio:.1f}%)"
+                        p_name = str(pipes.iloc[r, 1]).replace("Ø", "C") if prefix in ["ELP", "PE"] else str(pipes.iloc[r, 1])
+                        base_str = f"{prefix} {p_name}"
+                        res_str = f"{base_str} (점유율 {ratio:.1f}%)"
                         if final_runs > 1: res_str += f" × {final_runs}조(관)"
                         if r > 0:
                             prev_area = float(pipes.iloc[r-1, 2])
                             prev_ratio = (total_area_per_run / prev_area) * 100
-                            res_str += f"\n   ➔ [참고] 한 단계 축소 시 {pipes.iloc[r-1, 1]} (점유율 {prev_ratio:.1f}%)"
+                            prev_name = str(pipes.iloc[r-1, 1]).replace("Ø", "C") if prefix in ["ELP", "PE"] else str(pipes.iloc[r-1, 1])
+                            res_str += f"\n   ➔ [축소 시] {prefix} {prev_name} (점유율 {prev_ratio:.1f}%)"
                         return res_str
                 except: pass
-            return "불가"
+            return f"{prefix} 산출 불가 (규격 초과)"
 
         if "EF" in install_method: 
             copy_conduit_txt = "해당 없음 (트레이 공사)"
         elif "D1" in install_method: 
-            copy_conduit_txt = f"ELP {get_pipe_info('ELP|파형')} \n- 지중 PE관: {get_pipe_info('PE')}"
+            copy_conduit_txt = f"{get_pipe_info('ELP|파형', 'ELP')} \n - {get_pipe_info('PE', 'PE')}"
         else: 
-            copy_conduit_txt = f"CD {get_pipe_info('CD|파상')}\n- HI {get_pipe_info('HI|경질')}\n- ST {get_pipe_info('ST|스틸|강제|후강')}"
+            copy_conduit_txt = f"{get_pipe_info('CD|파상', 'CD')} \n - {get_pipe_info('HI|경질', 'HI')} \n - {get_pipe_info('ST|스틸|강제|후강', 'ST')}"
 
         # ==========================================
-        # 4. 결과 출력 (카톡/문자 공유용 텍스트 박스 단일 출력)
+        # 4. 결과 출력
         # ==========================================
         st.write("---")
         st.markdown("**📲 전체 결과 공유하기 (카톡/문자)**")
@@ -472,7 +638,7 @@ with tab_calc:
         if "D1" in install_method:
             kakao_msg += f"- 공사방법: {install_method} / 지중온도계수: {c_temp_ground} ({temp_ground_label})\n"
         else:
-            env_str_msg = f"- 공사방법: {install_method} / 기중온도계수: {c_temp_air} ({temp_air_label})"
+            env_str_msg = f"- 공사방법: {install_method} /기중온도계수: {c_temp_air} ({temp_air_label})"
             if "EF" in install_method: env_str_msg += f" / 트레이보정: {tray_label}"
             kakao_msg += env_str_msg + "\n"
 
@@ -483,7 +649,7 @@ with tab_calc:
 
         kakao_msg += "📊 [계산 결과]\n"
         kakao_msg += f"- 케이블: {display_cable_name} (1가닥 외경: 약 {phase_od:.1f}mm)\n"
-        kakao_msg += f"- 보호도체: {pe_name} (외경: 약 {pe_od:.1f}mm)\n"
+        kakao_msg += f"- 보호도체: {pe_name} (1가닥 외경: 약 {pe_od:.1f}mm)\n"
         kakao_msg += f"- 차단기: MCCB {poles} {sel_breaker}A\n"
         if is_motor:
             kakao_msg += f"- 순시 전압강하율: {final_v_drop_start_percent:.2f} %\n"
@@ -503,7 +669,6 @@ with tab_calc:
             step_msg_idx += 1
 
         kakao_msg += f"{step_msg_idx}. 차단기 선정: {i_load:.1f}A × {breaker_margin} 여유율 = {applied_current:.1f}A 이상 선정\n"
-        
         if is_motor:
             kakao_msg += f" ㄴ 🕒 한시트립 방어: {start_current:.1f}A / 동작배율({min_multiple}) = {(start_current/min_multiple):.1f}A 이상 필요\n"
             kakao_msg += f" ㄴ ⚡ 순시트립 방어: {start_current:.1f}A × 1.5 / 차단배율({inst_multiple}) = {(inrush_current/inst_multiple):.1f}A 이상 필요 ➔ 최종 {sel_breaker}AT 선정\n"
@@ -517,10 +682,8 @@ with tab_calc:
 
         if not parallel_mode:
             kakao_msg += f" ㄴ ① 허용전류: {req_sq_amp}SQ 필요 ({req_sq_base_amp:.1f}A @{phase_str} {applied_method} × 온도{final_temp_f} × 복수{final_group_f} = {req_sq_final_amp:.1f}A)\n"
-            
             kakao_msg += f" ㄴ ② 정상전압강하 (약식산출): A = ({k_coef} × {distance}m × {i_load:.1f}A) / (1000 × {e_max:.1f}V) = {req_area_vd:.1f}㎟ ➔ {req_sq_vd}SQ 이상 필요\n"
             kakao_msg += f"    ➔ [정식검증]: e = ({'√3' if phase==3 else '2'} × {i_load:.1f}A × {distance}m × (R{r_val:.4f}×{pf} + X{x_val:.4f}×{sin_pf:.3f})) / 1000 = {final_v_drop_formal:.1f}V (적용 {final_v_drop_formal_percent:.2f}%) ≤ 기준 {v_drop_limit}% 만족\n"
-            
             if is_motor:
                 kakao_msg += f" ㄴ ③ 순시전압강하: e = ({'√3' if phase==3 else '2'} × {start_current:.1f}A × {distance}m × (R{r_val:.4f}×{pf_start} + X{x_val:.4f}×{sin_start:.3f})) / 1000\n"
                 kakao_msg += f"    ➔ {final_v_drop_start:.1f}V (적용 {final_v_drop_start_percent:.2f}%) ≤ 15% 조건 검토\n"
@@ -537,7 +700,6 @@ with tab_calc:
             kakao_msg += f" ㄴ ③ 최종 선정: {final_size}SQ × {final_runs}조 포설 확정\n"
             
             kakao_msg += f" ㄴ [허용전류 검증] {final_size}SQ 기본({final_base_amp:.1f}A @{phase_str} {applied_method}) × 온도계수({final_temp_f}) × 복수계수({final_group_f}) × {final_runs}조 = 적용 {final_amp:.1f}A\n"
-            
             kakao_msg += f" ㄴ [정상전압강하 (약식산출)] e = ({k_coef} × {distance}m × {i_load:.1f}A) / (1000 × {final_size}SQ × {final_runs}조) = {final_v_drop:.1f}V (적용 {final_v_drop_percent:.1f}%)\n"
             kakao_msg += f"    ➔ [정식검증] e = ({'√3' if phase==3 else '2'} × {i_load:.1f}A × {distance}m × (R{r_val:.4f}×{pf} + X{x_val:.4f}×{sin_pf:.3f})) / (1000 × {final_runs}조) = {final_v_drop_formal:.1f}V (적용 {final_v_drop_formal_percent:.2f}%) ≤ 기준 {v_drop_limit}% 만족\n"
             
